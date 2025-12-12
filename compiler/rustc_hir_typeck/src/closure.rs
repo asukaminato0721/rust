@@ -202,7 +202,25 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         (bound_sig.skip_binder().output(), tcx.types.unit)
                     }
                     hir::CoroutineDesugaring::AsyncGen => {
-                        todo!("`async gen` closures not supported yet")
+                        let item_ty = bound_sig.skip_binder().output();
+                        self.require_type_is_sized(
+                            item_ty,
+                            expr_span,
+                            ObligationCauseCode::SizedYieldType,
+                        );
+
+                        let option_ty = Ty::new_adt(
+                            tcx,
+                            tcx.adt_def(tcx.require_lang_item(LangItem::Option, expr_span)),
+                            tcx.mk_args(&[item_ty.into()]),
+                        );
+                        let poll_ty = Ty::new_adt(
+                            tcx,
+                            tcx.adt_def(tcx.require_lang_item(LangItem::Poll, expr_span)),
+                            tcx.mk_args(&[option_ty.into()]),
+                        );
+
+                        (tcx.types.unit, poll_ty)
                     }
                 };
                 // Compute all of the variables that will be used to populate the coroutine.

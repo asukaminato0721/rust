@@ -1163,9 +1163,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         let coroutine_desugaring = match coroutine_kind {
             CoroutineKind::Async { .. } => hir::CoroutineDesugaring::Async,
             CoroutineKind::Gen { .. } => hir::CoroutineDesugaring::Gen,
-            CoroutineKind::AsyncGen { span, .. } => {
-                span_bug!(span, "only async closures and `iter!` closures are supported currently")
-            }
+            CoroutineKind::AsyncGen { .. } => hir::CoroutineDesugaring::AsyncGen,
         };
 
         let body = self.with_new_scopes(fn_decl_span, |this| {

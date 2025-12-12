@@ -7,12 +7,10 @@
 //! `RETURN_PLACE` the MIR arguments) are always fully normalized (and
 //! contain revealed `impl Trait` values).
 
-use std::assert_matches::assert_matches;
-
 use itertools::Itertools;
-use rustc_hir as hir;
+use rustc_hir::{self as hir, LangItem};
 use rustc_infer::infer::{BoundRegionConversionTime, RegionVariableOrigin};
-use rustc_middle::mir::*;
+use rustc_middle::{bug, mir::*};
 use rustc_middle::ty::{self, Ty};
 use rustc_span::Span;
 use tracing::{debug, instrument};
@@ -49,14 +47,15 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
         // transformation here, since we do the same thing in HIR typeck.
         // Maybe we could just fix up the canonicalized signature during HIR typeck?
         if let DefiningTy::CoroutineClosure(_, args) = self.universal_regions.defining_ty {
-            assert_matches!(
-                self.tcx().coroutine_kind(self.tcx().coroutine_for_closure(mir_def_id)),
-                Some(hir::CoroutineKind::Desugared(
-                    hir::CoroutineDesugaring::Async | hir::CoroutineDesugaring::Gen,
-                    hir::CoroutineSource::Closure
-                )),
-                "this needs to be modified if we're lowering non-async closures"
-            );
+            let coroutine_def_id = self.tcx().coroutine_for_closure(mir_def_id);
+            let Some(hir::CoroutineKind::Desugared(desugaring, hir::CoroutineSource::Closure)) =
+                self.tcx().coroutine_kind(coroutine_def_id)
+            else {
+                bug!(
+                    "unexpected coroutine kind for coroutine-closure {:?}",
+                    self.tcx().coroutine_kind(coroutine_def_id)
+                );
+            };
             // Make sure to use the args from `DefiningTy` so the right NLL region vids are
             // prepopulated into the type.
             let args = args.as_coroutine_closure();
@@ -72,20 +71,42 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
             );
 
             let next_ty_var = || self.infcx.next_ty_var(self.body.span);
+            let (coroutine_return_ty, coroutine_yield_ty) = match desugaring {
+                hir::CoroutineDesugaring::Async | hir::CoroutineDesugaring::Gen => {
+                    (user_provided_sig.output(), next_ty_var())
+                }
+                hir::CoroutineDesugaring::AsyncGen => {
+                    let item_ty = user_provided_sig.output();
+                    let option_ty = Ty::new_adt(
+                        self.tcx(),
+                        self.tcx()
+                            .adt_def(self.tcx().require_lang_item(LangItem::Option, self.body.span)),
+                        self.tcx().mk_args(&[item_ty.into()]),
+                    );
+                    let poll_ty = Ty::new_adt(
+                        self.tcx(),
+                        self.tcx()
+                            .adt_def(self.tcx().require_lang_item(LangItem::Poll, self.body.span)),
+                        self.tcx().mk_args(&[option_ty.into()]),
+                    );
+                    (self.tcx().types.unit, poll_ty)
+                }
+            };
+
             let output_ty = Ty::new_coroutine(
                 self.tcx(),
-                self.tcx().coroutine_for_closure(mir_def_id),
+                coroutine_def_id,
                 ty::CoroutineArgs::new(
                     self.tcx(),
                     ty::CoroutineArgsParts {
                         parent_args: args.parent_args(),
                         kind_ty: Ty::from_coroutine_closure_kind(self.tcx(), args.kind()),
-                        return_ty: user_provided_sig.output(),
+                        return_ty: coroutine_return_ty,
                         tupled_upvars_ty,
                         // For async closures, none of these can be annotated, so just fill
                         // them with fresh ty vars.
                         resume_ty: next_ty_var(),
-                        yield_ty: next_ty_var(),
+                        yield_ty: coroutine_yield_ty,
                     },
                 )
                 .args,
